@@ -1,0 +1,34 @@
+name: Bearish Divergence Scanner
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # Every hour on the hour
+    - cron: '30 * * * *'  # Every hour on the half hour
+  workflow_dispatch:        # Also allows manual trigger from GitHub UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run scanner
+        env:
+          NTFY_TOPIC:    ${{ secrets.NTFY_TOPIC }}
+          TIMEFRAME:     ${{ vars.TIMEFRAME     || '60' }}
+          LB_LEFT:       ${{ vars.LB_LEFT       || '5'  }}
+          LB_RIGHT:      ${{ vars.LB_RIGHT      || '5'  }}
+          RANGE_LOWER:   ${{ vars.RANGE_LOWER   || '5'  }}
+          RANGE_UPPER:   ${{ vars.RANGE_UPPER   || '60' }}
+          MIN_RSI_DROP:  ${{ vars.MIN_RSI_DROP  || '2'  }}
+          MAX_BARS_AGO:  ${{ vars.MAX_BARS_AGO  || '2'  }}
+          MIN_STRENGTH:  ${{ vars.MIN_STRENGTH  || '8'  }}
+        run: node scanner.js
