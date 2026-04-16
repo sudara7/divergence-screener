@@ -1,6 +1,6 @@
 const BASE = 'https://api.bybit.com';
 const CONCURRENCY = 5;
-const DELAY = 150;
+const DELAY = 200;
 
 const TF         = process.env.TIMEFRAME    || '60';
 const LBL        = parseInt(process.env.LB_LEFT)     || 5;
@@ -12,6 +12,14 @@ const MAX_BARS   = parseInt(process.env.MAX_BARS_AGO) || 2;
 const MIN_STR    = parseFloat(process.env.MIN_STRENGTH) || 8;
 const NTFY_TOPIC = process.env.NTFY_TOPIC || '';
 const LIMIT      = 150;
+
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Referer': 'https://www.bybit.com/',
+  'Origin': 'https://www.bybit.com'
+};
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -81,9 +89,27 @@ function detectDiv(closes, highs, times) {
   return null;
 }
 
+async function fetchWithRetry(url, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const r = await fetch(url, { headers: HEADERS });
+      const text = await r.text();
+      if (text.trim().startsWith('<')) {
+        console.warn(`  HTML response for ${url} (attempt ${i+1}/${retries}), retrying...`);
+        await sleep(2000 * (i + 1));
+        continue;
+      }
+      return JSON.parse(text);
+    } catch(e) {
+      if (i === retries - 1) throw e;
+      await sleep(1000 * (i + 1));
+    }
+  }
+  throw new Error(`Failed after ${retries} attempts: ${url}`);
+}
+
 async function fetchSymbols() {
-  const r = await fetch(`${BASE}/v5/market/instruments-info?category=linear&limit=1000&status=Trading`);
-  const d = await r.json();
+  const d = await fetchWithRetry(`${BASE}/v5/market/instruments-info?category=linear&limit=1000&status=Trading`);
   return d.result.list
     .filter(s => s.symbol.endsWith('USDT') && s.contractType === 'LinearPerpetual')
     .map(s => s.symbol);
@@ -91,8 +117,7 @@ async function fetchSymbols() {
 
 async function fetchKlines(sym) {
   try {
-    const r = await fetch(`${BASE}/v5/market/kline?category=linear&symbol=${sym}&interval=${TF}&limit=${LIMIT}`);
-    const d = await r.json();
+    const d = await fetchWithRetry(`${BASE}/v5/market/kline?category=linear&symbol=${sym}&interval=${TF}&limit=${LIMIT}`);
     if (d.retCode !== 0) return null;
     return d.result.list.reverse().map(k => ({
       close: parseFloat(k[4]),
@@ -112,10 +137,10 @@ function fmtTime(ts) {
 async function sendNtfy(signal, sym) {
   if (!NTFY_TOPIC) return;
   const base = sym.replace('USDT', '');
-  const tfLabel = TF === 'D' ? '1D' : TF === '60' ? '1H' : TF === '240' ? '4H' : TF + 'm';
+  const tfLabel = TF === 'D' ? '1D' : TF === '240' ? '4H' : TF === '60' ? '1H' : TF + 'm';
   const title = `Bear Div: ${base}/USDT (${tfLabel})`;
   const body = [
-    `RSI drop: -${signal.rsiDiff.toFixed(1)} (${signal.rsiH1.toFixed(1)} → ${signal.rsiH2.toFixed(1)})`,
+    `RSI drop: -${signal.rsiDiff.toFixed(1)} (${signal.rsiH1.toFixed(1)} -> ${signal.rsiH2.toFixed(1)})`,
     `Price rise: +${signal.priceDiff.toFixed(2)}%`,
     `SH1: ${fmtTime(signal.timeSH1)}`,
     `SH2: ${fmtTime(signal.timeSH2)}`,
@@ -124,15 +149,10 @@ async function sendNtfy(signal, sym) {
   ].join('\n');
 
   const priority = signal.rsiDiff >= 12 ? 'urgent' : signal.rsiDiff >= 8 ? 'high' : 'default';
-
   try {
     const res = await fetch(`https://ntfy.sh/${encodeURIComponent(NTFY_TOPIC)}`, {
       method: 'POST',
-      headers: {
-        'Title': title,
-        'Priority': priority,
-        'Tags': 'chart_with_downwards_trend,rotating_light'
-      },
+      headers: { 'Title': title, 'Priority': priority, 'Tags': 'chart_with_downwards_trend' },
       body
     });
     if (res.ok) console.log(`  Notified: ${sym} (RSI drop -${signal.rsiDiff.toFixed(1)})`);
@@ -143,10 +163,10 @@ async function sendNtfy(signal, sym) {
 }
 
 async function main() {
-  const started = new Date().toISOString();
   console.log(`\n=== Bearish Divergence Scanner ===`);
-  console.log(`Time: ${started}`);
-  console.log(`TF: ${TF}m | LbL: ${LBL} | LbR: ${LBR} | Range: ${RNG_LO}-${RNG_HI} | MinRSI: ${MIN_RSI} | MaxBarsAgo: ${MAX_BARS} | MinStrength: ${MIN_STR}`);
+  console.log(`Time: ${new Date().toISOString()}`);
+  console.log(`TF: ${TF} | LbL: ${LBL} | LbR: ${LBR} | Range: ${RNG_LO}-${RNG_HI} | MinRSI: ${MIN_RSI} | MaxBarsAgo: ${MAX_BARS} | MinStrength: ${MIN_STR}`);
+  console.log(`NTFY topic: ${NTFY_TOPIC ? NTFY_TOPIC.slice(0,4) + '****' : 'NOT SET — notifications disabled'}`);
 
   let symbols;
   try {
@@ -177,9 +197,9 @@ async function main() {
     await sleep(DELAY);
   }
 
-  console.log(`Found ${signals.length} divergences. Strong (>= ${MIN_STR}): ${signals.filter(s => s.rsiDiff >= MIN_STR).length}\n`);
-
   const strong = signals.filter(s => s.rsiDiff >= MIN_STR);
+  console.log(`Found ${signals.length} divergences. Strong (>=${MIN_STR}): ${strong.length}\n`);
+
   if (strong.length === 0) {
     console.log('No strong signals this scan.');
   } else {
@@ -188,7 +208,6 @@ async function main() {
       await sendNtfy(s, s.symbol);
     }
   }
-
   console.log('\nDone.');
 }
 
